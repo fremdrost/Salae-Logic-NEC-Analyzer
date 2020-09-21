@@ -19,6 +19,8 @@ public:
 	virtual void GeneratePacketTabularText( U64 packet_id, DisplayBase display_base );
 	virtual void GenerateTransactionTabularText( U64 transaction_id, DisplayBase display_base );
 
+	enum FrameType { AddressFrame, ExtAddressFrame, CommandFrame, RepeatFrame, AgcFrame};
+
 protected: //functions
 
 protected:  //vars

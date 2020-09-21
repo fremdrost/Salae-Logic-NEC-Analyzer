@@ -28,16 +28,15 @@ void NECAnalyzer::WorkerThread()
 
 	mNEC = GetAnalyzerChannelData( mSettings->mInputChannel );
 
-	if( mNEC->GetBitState() == BIT_LOW )
-		mNEC->AdvanceToNextEdge();
-
 	//init parametrs
 	mTAGCMark = mSettings->mPreTimeMark;
 	mTAGCSpace = mSettings->mPreTimeSpace;
+	mTRepeatMark = mSettings->mRepeatTimeMark;
+	mTRepeatSpace = mSettings->mRepeatTimeSpace;
 	mTMark = mSettings->mMark;
 	mTSpace0 = mSettings->mZeroSpace;
 	mTSpace1 = mSettings->mOneSpace;
-	mTError = 100;
+	mTError = mSettings->mError;
 	mSynchronised = false;
 
 	mBitsForNextByte.clear();
@@ -46,91 +45,118 @@ void NECAnalyzer::WorkerThread()
 	for( ; ; )
 	{
 		//find first AGC pulse
-		mNEC->AdvanceToNextEdge();	//falling
+		mNEC->AdvanceToNextEdge(); //falling
+
+		ReportProgress(mNEC->GetSampleNumber());
+		CheckIfThreadShouldExit();
+
+		// expect falling
 		if (mNEC->GetBitState() == BIT_LOW)
 		{
 			edge_location = mNEC->GetSampleNumber();
 		}
+		else {
+			// sync to falling edge
+			continue;
+		}
 
-		U64 next_edge_location = mNEC->GetSampleOfNextEdge();
+		U64 next_edge_location = mNEC->GetSampleOfNextEdge(); //peak for rising
 		U64 edge_distance = next_edge_location - edge_location;
 		if ((edge_distance < UsToSample((U64)mTAGCMark + mTError)) && (edge_distance > UsToSample(mTAGCMark - mTError)))
 		{
 			mNEC->AdvanceToNextEdge();	//rising
 
-			next_edge_location = mNEC->GetSampleOfNextEdge();
+			next_edge_location = mNEC->GetSampleOfNextEdge(); //peak for falling
 			edge_distance = next_edge_location - edge_location;
+
+			//mResults->CancelPacketAndStartNewPacket();
+
+			// Repeat frame
+			if ((edge_distance < UsToSample((U64)mTRepeatMark + mTRepeatSpace + mTError))
+				&& (edge_distance > UsToSample((U64)mTRepeatMark + mTRepeatSpace - mTError)))
+			{
+				Frame frame;
+				frame.mStartingSampleInclusive = edge_location;
+				frame.mEndingSampleInclusive = next_edge_location;
+				frame.mType = NECAnalyzerResults::RepeatFrame;
+				mResults->AddFrame(frame);
+
+				//mResults->CommitPacketAndStartNewPacket();
+				mResults->CommitResults();
+				continue; // next frame
+			} else
+			// Command frame
 			if ((edge_distance < UsToSample((U64)mTAGCMark + mTAGCSpace + mTError))
 				&& (edge_distance > UsToSample((U64)mTAGCMark + mTAGCSpace - mTError)))
 			{
 				mSynchronised = true;
+				Frame frame;
+
 				frame_start_location = next_edge_location;
+				// mark AGC pulse
 				mResults->AddMarker(edge_location, AnalyzerResults::Start, mSettings->mInputChannel);
 				mResults->AddMarker(next_edge_location, AnalyzerResults::Stop, mSettings->mInputChannel);
-				mResults->CommitResults();
-				ReportProgress(mNEC->GetSampleNumber());
-			}
-		}
-		//receive adress
-		//receive command
-		while (mSynchronised == true)
-		{
-			CheckIfThreadShouldExit();
-			mNEC->AdvanceToNextEdge();
 
-			edge_location = mNEC->GetSampleNumber();
-			next_edge_location = mNEC->GetSampleOfNextEdge();
-			edge_distance = next_edge_location - edge_location;
-			//find mark
-			if ((edge_distance < UsToSample((U64)mTMark + mTError)) && (edge_distance > UsToSample(mTMark - mTError)))
-			{
-				//find space
-				mNEC->AdvanceToNextEdge();
-				edge_location = mNEC->GetSampleNumber();
-				next_edge_location = mNEC->GetSampleOfNextEdge();
-				edge_distance = next_edge_location - edge_location;
-				if ((edge_distance < UsToSample((U64)mTSpace0 + mTError)) && (edge_distance > UsToSample(mTSpace0 - mTError)))
-					mBitsForNextByte.push_back(0);
-				else if ((edge_distance < UsToSample((U64)mTSpace1 + mTError)) && (edge_distance > UsToSample(mTSpace1 - mTError)))
-					mBitsForNextByte.push_back(1);
-				else
-				{
-					//error 
-					mSynchronised = false;
-					mBitsForNextByte.clear();
-				}
-			}
-			else
-			{
-				//error read data
-				mSynchronised = false;
-				mBitsForNextByte.clear();
-			}
-
-			if (mBitsForNextByte.size() == 8)
-			{
-				//finish read adress, push data to frame
-				frame_end_location = next_edge_location;
-
-				U64 byte = 0;
-				for (U32 i = 0; i < 8; ++i)
-					byte |= (mBitsForNextByte[i] << i);
-				mBitsForNextByte.clear();
-
-				Frame frame;
-				frame.mStartingSampleInclusive = frame_start_location;
-				frame.mEndingSampleInclusive = frame_end_location;
-				frame.mData1 = byte;
+				frame.mStartingSampleInclusive = edge_location;
+				frame.mEndingSampleInclusive = next_edge_location;
+				frame.mType = NECAnalyzerResults::AgcFrame;
 				mResults->AddFrame(frame);
-				mResults->CommitResults();
-				ReportProgress(mNEC->GetSampleNumber());
 
-				frame_start_location = frame_end_location;
+				mNEC->AdvanceToNextEdge();
+
+				U8 low, high;
+				// receive address
+				if (!GetNextByte(low)) {
+					mResults->AddMarker(mNEC->GetSampleNumber(), AnalyzerResults::ErrorX, mSettings->mInputChannel);
+					mResults->CommitResults();
+					continue;
+				}
+				if (!GetNextByte(high)) {
+					mResults->AddMarker(mNEC->GetSampleNumber(), AnalyzerResults::ErrorSquare, mSettings->mInputChannel);
+					mResults->CommitResults();
+					continue;
+				}
+				if (low ^ (0xFF ^ high)) {
+					frame.mData1 = high;
+					frame.mData2 = low;
+					frame.mType = NECAnalyzerResults::ExtAddressFrame;
+				}
+				else {
+					frame.mData1 = low;
+					frame.mType = NECAnalyzerResults::AddressFrame;
+				}
+				frame.mStartingSampleInclusive = frame_start_location;
+				frame.mEndingSampleInclusive = frame_end_location = mNEC->GetSampleNumber();
+				mResults->AddFrame(frame);
+
+				// receive command
+				if (!GetNextByte(high)) {
+					mResults->AddMarker(mNEC->GetSampleNumber(), AnalyzerResults::ErrorSquare, mSettings->mInputChannel);
+					mResults->CommitResults();
+					continue;
+				}
+				if (!GetNextByte(low)) {
+					mResults->AddMarker(mNEC->GetSampleNumber(), AnalyzerResults::ErrorX, mSettings->mInputChannel);
+					mResults->CommitResults();
+					continue;
+				}
+				frame.mData1 = (U16)high;
+				frame.mData2 = (U16)low;
+				frame.mStartingSampleInclusive = frame_end_location;
+				frame.mEndingSampleInclusive = mNEC->GetSampleNumber();
+				frame.mType = NECAnalyzerResults::CommandFrame;
+				mResults->AddFrame(frame);
+
+				//mResults->CommitPacketAndStartNewPacket();
+				mResults->CommitResults();
+			}
+			else {
+				continue; // error
 			}
 		}
-
-		ReportProgress(mNEC->GetSampleNumber());
-		CheckIfThreadShouldExit();
+		else {
+			continue; // error
+		}
 	}
 }
 
@@ -142,6 +168,53 @@ U64 NECAnalyzer::UsToSample(U64 us)
 U64 NECAnalyzer::SamplesToUs(U64 samples)
 {
 	return(samples * 1000000) / mSampleRateHz;
+}
+
+bool NECAnalyzer::GetNextByte(U8& byte) {
+	bool bit;
+	byte = 0;
+	while (mSynchronised) {
+		mNEC->AdvanceToNextEdge();
+
+		if (!GetNextBit(bit)) {
+			mSynchronised = false;
+			mBitsForNextByte.clear();
+			mNEC->AdvanceToNextEdge();
+			return false;
+		}
+		else {
+			mNEC->AdvanceToNextEdge();
+			mBitsForNextByte.push_back(bit);
+		}
+		if (mBitsForNextByte.size() == 8) {
+			for(U8 i = 0; i<8 ; i++)
+				byte |= (mBitsForNextByte[i] << i);
+			mBitsForNextByte.clear();
+			return true;
+		}
+	}
+	mBitsForNextByte.clear();
+	return false;
+}
+
+bool NECAnalyzer::GetNextBit(bool& bit) {
+	bit = 0;
+	U64 edge_location = mNEC->GetSampleNumber();
+	U64 next_edge_location = mNEC->GetSampleOfNextEdge();
+	U64 edge_distance = next_edge_location - edge_location;
+	if ((edge_distance < UsToSample((U64)mTSpace0 + mTError))
+		&& (edge_distance > UsToSample((U64)mTSpace0 - mTError))) {
+		bit = 0;
+		return true;
+	}
+	else if ((edge_distance < UsToSample((U64)mTSpace1 + mTError))
+		&& (edge_distance > UsToSample((U64)mTSpace1 - mTError))) {
+		bit = 1;
+		return true;
+	}
+	else {
+		return false;
+	}
 }
 
 bool NECAnalyzer::NeedsRerun()

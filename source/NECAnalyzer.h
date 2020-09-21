@@ -21,10 +21,14 @@ public:
 	virtual const char* GetAnalyzerName() const;
 	virtual bool NeedsRerun();
 
-protected: //vars
+protected: //func
 	U64 UsToSample(U64 us);
 	U64 SamplesToUs(U64 samples);
 
+	bool GetNextByte(U8& byte);
+	bool GetNextBit(bool& bit);
+
+protected: //vars
 	std::auto_ptr< NECAnalyzerSettings > mSettings;
 	std::auto_ptr< NECAnalyzerResults > mResults;
 	AnalyzerChannelData* mNEC;
@@ -34,10 +38,15 @@ protected: //vars
 
 	//NEC analysis vars:
 	U32 mSampleRateHz;
+	U32 mTRepeatMark;
+	U32 mTRepeatSpace;
 	U32 mTAGCMark;
 	U32 mTAGCSpace;
+	// Bit marker
 	U32 mTMark;
+	// Space for 0 Bit
 	U32 mTSpace0;
+	// Space for 1 Bit
 	U32 mTSpace1;
 	U32 mTError;
 	bool mSynchronised;
@@ -49,3 +58,8 @@ extern "C" ANALYZER_EXPORT Analyzer* __cdecl CreateAnalyzer( );
 extern "C" ANALYZER_EXPORT void __cdecl DestroyAnalyzer( Analyzer* analyzer );
 
 #endif //NEC_ANALYZER_H
+
+
+// https://support.saleae.com/protocol-analyzers/unofficially-supported-protocols
+// https://github.com/kodizhuk/Salae-Logic-NEC-Analyzer
+// https://www.sbprojects.net/knowledge/ir/nec.php
